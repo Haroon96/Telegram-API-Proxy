@@ -51,6 +51,15 @@ const CACHE_CONFIGS = {
     getMe: { ttl: 3600, edge: true },
     getUpdates: { ttl: 0, edge: false },
     sendMessage: { ttl: 0, edge: false },
+    sendPhoto: { ttl: 0, edge: false },
+    sendDocument: { ttl: 0, edge: false },
+    sendVideo: { ttl: 0, edge: false },
+    sendAudio: { ttl: 0, edge: false },
+    sendVoice: { ttl: 0, edge: false },
+    sendAnimation: { ttl: 0, edge: false },
+    sendSticker: { ttl: 0, edge: false },
+    sendVideoNote: { ttl: 0, edge: false },
+    sendMediaGroup: { ttl: 0, edge: false },
     getChat: { ttl: 600, edge: true },
     getChatAdministrators: { ttl: 1800, edge: true }
 };
@@ -66,6 +75,13 @@ const MALICIOUS_PATTERNS = [
     /union\s+select/gi,
     /(\bor\b|\band\b)\s+\d+\s*=\s*\d+/gi
 ];
+
+const FILE_UPLOAD_METHODS = new Set([
+    'sendPhoto', 'sendDocument', 'sendVideo', 'sendAudio', 
+    'sendVoice', 'sendAnimation', 'sendSticker', 'sendVideoNote', 
+    'sendMediaGroup', 'setChatPhoto', 'uploadStickerFile',
+    'createNewStickerSet', 'addStickerToSet', 'setStickerSetThumb'
+]);
 
 let requestStats = {
     total: 0,
@@ -178,8 +194,11 @@ async function performAdvancedSecurityChecks(request, env) {
     }
 
     const contentLength = request.headers.get('content-length');
-    if (contentLength && parseInt(contentLength) > MAX_BODY_SIZE) {
-        return { blocked: true, reason: 'Request too large', status: 413 };
+    if (contentLength) {
+        const bodySize = parseInt(contentLength);
+        if (bodySize > MAX_BODY_SIZE) {
+            return { blocked: true, reason: 'Request too large', status: 413 };
+        }
     }
 
     if (ALLOWED_COUNTRIES.length > 0) {
@@ -219,8 +238,8 @@ async function performAdvancedSecurityChecks(request, env) {
 
     if (request.method === 'POST' && contentType.includes('multipart/form-data')) {
         const boundary = contentType.split('boundary=')[1];
-        if (!boundary || boundary.length > 100) {
-            return { blocked: true, reason: 'Invalid content type', status: 400 };
+        if (boundary && boundary.length > 200) {
+            return { blocked: true, reason: 'Invalid multipart boundary', status: 400 };
         }
     }
 
@@ -507,21 +526,31 @@ async function proxyToTelegram(request, requestInfo, attempt = 0) {
     requestHeaders.set('Cache-Control', 'no-cache');
     requestHeaders.set('X-Forwarded-Proto', 'https');
     
-    if (request.method === 'POST') {
-        requestHeaders.set('Content-Type', request.headers.get('content-type') || 'application/json');
-    }
-    
     let requestBody;
+    let contentType = request.headers.get('content-type') || '';
+    
     if (request.method !== 'GET' && request.method !== 'HEAD') {
         try {
-            requestBody = await request.clone().arrayBuffer();
+            if (contentType.includes('multipart/form-data') || FILE_UPLOAD_METHODS.has(apiMethod)) {
+                const formData = await request.formData();
+                requestBody = formData;
+                requestHeaders.delete('content-type');
+            } else {
+                requestBody = await request.arrayBuffer();
+                if (request.method === 'POST' && !contentType) {
+                    requestHeaders.set('Content-Type', 'application/json');
+                } else if (contentType) {
+                    requestHeaders.set('Content-Type', contentType);
+                }
+            }
         } catch (error) {
             throw new Error('Failed to read request body');
         }
     }
     
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeoutDuration = FILE_UPLOAD_METHODS.has(apiMethod) ? 120000 : 30000;
+    const timeout = setTimeout(() => controller.abort(), timeoutDuration);
     
     try {
         const newRequest = new Request(newUrl.toString(), {
@@ -534,17 +563,19 @@ async function proxyToTelegram(request, requestInfo, attempt = 0) {
         
         const cacheConfig = CACHE_CONFIGS[apiMethod] || { ttl: 0, edge: false };
         
+        const fetchTimeout = FILE_UPLOAD_METHODS.has(apiMethod) ? 100000 : 25000;
+        
         const response = await fetch(newRequest, {
             cf: {
                 cacheTtl: cacheConfig.ttl,
-                cacheEverything: cacheConfig.edge,
+                cacheEverything: cacheConfig.edge && request.method === 'GET',
                 polish: 'off',
                 minify: {
                     javascript: false,
                     css: false,
                     html: false
                 },
-                timeout: 25000
+                timeout: fetchTimeout
             }
         });
         
