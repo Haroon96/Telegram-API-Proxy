@@ -35,9 +35,9 @@ const SUSPICIOUS_THRESHOLD = 10;
 
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
 const MAX_BODY_SIZE = 50 * 1024 * 1024;
-const ALLOWED_COUNTRIES = ['IR'];
+const ALLOWED_COUNTRIES = ['PK'];
 const BLOCKED_COUNTRIES = [];
-const ALLOWED_USER_AGENTS = /telegram|bot|curl|postman|httpie|axios|fetch/i;
+const ALLOWED_USER_AGENTS = /telegram|bot|curl|postman|httpie|axios|fetch|python-requests/i;
 const BLOCKED_USER_AGENTS = /scanner|crawler|spider|bot.*attack|sqlmap|nikto|nmap/i;
 
 const TELEGRAM_ENDPOINTS = [
