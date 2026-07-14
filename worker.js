@@ -351,7 +351,7 @@ function handleRootRequest(request) {
 '</div>\n' +
 '\n' +
 '<footer>\n' +
-'  <p>Powered by Cloudflare Workers &nbsp;&middot;&nbsp; Designed by <strong>Anonymous</strong></p>\n' +
+'  <p>Powered by Cloudflare Workers &nbsp;&middot;&nbsp; Engineered by <strong>Anonymous</strong></p>\n' +
 '</footer>\n' +
 '\n' +
 '</div>\n' +
