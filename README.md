@@ -121,6 +121,7 @@ bot.on("message", function (msg) {
 | `/` | Web dashboard — shows API URL, code examples, and connection test |
 | `/stats` | JSON stats — uptime, request count, avg latency, blocked count |
 | `/bot{TOKEN}/{METHOD}` | Telegram API relay (same format as official API) |
+| `/file/bot{TOKEN}/{FILE_PATH}` | Telegram file download relay (after `getFile`) |
 | `/favicon.ico` | Empty 204 response |
 
 ---
@@ -147,6 +148,7 @@ Open `worker.js` and edit these constants near the top of the file:
 - **Security headers** — CSP, HSTS, X-Frame-Options, Permissions-Policy, and more
 - **Bot token validation** — format and structure check with in-memory caching
 - **File upload support** — all Telegram media methods (sendPhoto, sendDocument, etc.)
+- **File download support** — proxies `/file/bot{TOKEN}/{FILE_PATH}` for images and other media returned by `getFile`
 - **Malicious request detection** — XSS, SQL injection, and path traversal patterns
 - **Edge caching** — configurable TTL per Telegram API method via Cloudflare
 

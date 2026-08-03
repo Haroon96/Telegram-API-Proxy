@@ -1,4 +1,5 @@
-const URL_PATH_REGEX = /^\/bot(?<bot_token>[^/]+)\/(?<api_method>[a-zA-Z0-9_]+)/i;
+const BOT_API_PATH_REGEX  = /^\/bot(?<bot_token>[^/]+)\/(?<api_method>[a-zA-Z0-9_]+)$/i;
+const BOT_FILE_PATH_REGEX = /^\/file\/bot(?<bot_token>[^/]+)\/(?<file_path>.+)$/i;
 
 const RATE_LIMITS = {
     IP:     { max: 100,  window: 60000 },
@@ -102,7 +103,9 @@ export default {
         if (pathname === '/stats')        return handleStatsRequest();
         if (pathname === '/favicon.ico')  return new Response(null, { status: 204 });
         if (request.method === 'OPTIONS') return handleCorsPreflightRequest();
-        if (URL_PATH_REGEX.test(pathname)) return handleProxyRequest(request);
+        if (BOT_FILE_PATH_REGEX.test(pathname) || BOT_API_PATH_REGEX.test(pathname)) {
+            return handleProxyRequest(request);
+        }
 
         return handle404Request();
     }
@@ -344,7 +347,7 @@ function handleRootRequest(request) {
 '    <div class="feature"><span class="check">&#10003;</span><span>Retry with exponential backoff</span></div>\n' +
 '    <div class="feature"><span class="check">&#10003;</span><span>Security headers (CSP, HSTS, Permissions-Policy)</span></div>\n' +
 '    <div class="feature"><span class="check">&#10003;</span><span>Bot token format validation &amp; caching</span></div>\n' +
-'    <div class="feature"><span class="check">&#10003;</span><span>File &amp; media upload support</span></div>\n' +
+'    <div class="feature"><span class="check">&#10003;</span><span>File &amp; media upload and download support</span></div>\n' +
 '    <div class="feature"><span class="check">&#10003;</span><span>XSS, SQLi &amp; path traversal detection</span></div>\n' +
 '    <div class="feature"><span class="check">&#10003;</span><span>Edge caching per Telegram API method</span></div>\n' +
 '  </div>\n' +
@@ -459,7 +462,7 @@ function handle404Request() {
     return new Response(JSON.stringify({
         ok:          false,
         error_code:  404,
-        description: 'Invalid endpoint. Use /bot{TOKEN}/{METHOD} format.'
+        description: 'Invalid endpoint. Use /bot{TOKEN}/{METHOD} or /file/bot{TOKEN}/{FILE_PATH} format.'
     }), {
         status: 404,
         headers: {
@@ -612,11 +615,22 @@ async function performSecurityChecks(request) {
 
 async function recordSuspiciousActivity(ip, type) {
     const now      = Date.now();
-    const existing = suspiciousIPs.get(ip) || { count: 0, types: new Set(), expires: now + 3600000 };
+    const existing = suspiciousIPs.get(ip) || { count: 0, expires: now + 3600000 };
     existing.count++;
-    existing.types.add(type);
-    existing.lastActivity = now;
     suspiciousIPs.set(ip, existing);
+}
+
+function decodePathSegment(value) {
+    if (!value) return value;
+    try {
+        let decoded = decodeURIComponent(value);
+        if (/%[0-9A-Fa-f]{2}/.test(decoded)) {
+            try { decoded = decodeURIComponent(decoded); } catch { /* keep single decode */ }
+        }
+        return decoded;
+    } catch {
+        return value;
+    }
 }
 
 function parseRequest(request) {
@@ -624,15 +638,55 @@ function parseRequest(request) {
     const path     = url.pathname;
     const clientIP = getClientIP(request);
 
-    if (!URL_PATH_REGEX.test(path)) return { valid: false };
+    const fileMatch = path.match(BOT_FILE_PATH_REGEX);
+    if (fileMatch?.groups) {
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+            return { valid: false };
+        }
 
-    const match     = path.match(URL_PATH_REGEX);
-    const botToken  = match?.groups?.bot_token  || '';
-    const apiMethod = match?.groups?.api_method || '';
+        const botToken = decodePathSegment(fileMatch.groups.bot_token || '');
+        let filePath   = fileMatch.groups.file_path || '';
+
+        try {
+            filePath = decodeURIComponent(filePath);
+        } catch {
+            return { valid: false };
+        }
+
+        if (
+            !botToken || botToken.length > 200 ||
+            !filePath || filePath.length > 1024 ||
+            filePath.includes('..') || filePath.startsWith('/') || filePath.includes('\\')
+        ) {
+            return { valid: false };
+        }
+
+        return {
+            valid: true,
+            clientIP,
+            botToken,
+            apiMethod: '',
+            isFile: true,
+            path
+        };
+    }
+
+    const match = path.match(BOT_API_PATH_REGEX);
+    if (!match?.groups) return { valid: false };
+
+    const botToken  = decodePathSegment(match.groups.bot_token || '');
+    const apiMethod = match.groups.api_method || '';
 
     if (botToken.length > 200 || apiMethod.length > 50) return { valid: false };
 
-    return { valid: true, clientIP, botToken, apiMethod, path };
+    return {
+        valid: true,
+        clientIP,
+        botToken,
+        apiMethod,
+        isFile: false,
+        path
+    };
 }
 
 function getClientIP(request) {
@@ -743,6 +797,8 @@ function updateCircuitBreaker(clientIP, success) {
 }
 
 function validateBotToken(token) {
+    token = decodePathSegment(token);
+
     const cached = tokenValidationCache.get(token);
     if (cached && Date.now() < cached.expires) return cached.valid;
 
@@ -766,8 +822,10 @@ function validateBotToken(token) {
 
 async function proxyWithRetry(request, info) {
     let lastError;
+    const canRetry   = !info.isFile && (request.method === 'GET' || request.method === 'HEAD');
+    const maxRetries = canRetry ? RETRY_CONFIG.MAX_RETRIES : 0;
 
-    for (let attempt = 0; attempt <= RETRY_CONFIG.MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             if (attempt > 0) {
                 stats.retries++;
@@ -786,7 +844,7 @@ async function proxyWithRetry(request, info) {
         } catch (error) {
             lastError = error;
             if (error.name === 'AbortError') continue;
-            if (attempt === RETRY_CONFIG.MAX_RETRIES) throw error;
+            if (attempt === maxRetries) throw error;
         }
     }
 
@@ -794,7 +852,7 @@ async function proxyWithRetry(request, info) {
 }
 
 async function proxyToTelegram(request, info) {
-    const { apiMethod, path } = info;
+    const { apiMethod, path, isFile } = info;
 
     const newUrl = new URL(request.url);
     newUrl.hostname = TELEGRAM_API_HOST;
@@ -810,7 +868,7 @@ async function proxyToTelegram(request, info) {
     let requestBody;
     const contentType = request.headers.get('content-type') || '';
 
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
+    if (!isFile && request.method !== 'GET' && request.method !== 'HEAD') {
         try {
             if (contentType.includes('multipart/form-data') || FILE_UPLOAD_METHODS.has(apiMethod)) {
                 requestBody = await request.formData();
@@ -828,12 +886,15 @@ async function proxyToTelegram(request, info) {
         }
     }
 
-    const controller  = new AbortController();
-    const isUpload    = FILE_UPLOAD_METHODS.has(apiMethod);
-    const timer       = setTimeout(() => controller.abort(), isUpload ? 120000 : 30000);
+    const controller = new AbortController();
+    const isUpload   = !isFile && FILE_UPLOAD_METHODS.has(apiMethod);
+    const longLived  = isFile || isUpload;
+    const timer      = setTimeout(() => controller.abort(), longLived ? 120000 : 30000);
 
     try {
-        const cacheConfig = CACHE_CONFIGS[apiMethod] || { ttl: 0, edge: false };
+        const cacheConfig = isFile
+            ? { ttl: 300, edge: true }
+            : (CACHE_CONFIGS[apiMethod] || { ttl: 0, edge: false });
 
         const response = await fetch(new Request(newUrl.toString(), {
             method:   request.method,
@@ -847,7 +908,7 @@ async function proxyToTelegram(request, info) {
                 cacheEverything: cacheConfig.edge && request.method === 'GET',
                 polish:          'off',
                 minify:          { javascript: false, css: false, html: false },
-                timeout:         isUpload ? 100000 : 25000
+                timeout:         longLived ? 100000 : 25000
             }
         });
 
@@ -857,8 +918,15 @@ async function proxyToTelegram(request, info) {
 
         const responseHeaders = new Headers(response.headers);
         addSecurityHeaders(responseHeaders);
+        if (isFile) {
+            // Binary file responses should not be blocked by an API CSP.
+            responseHeaders.delete('Content-Security-Policy');
+        }
 
-        return new Response(await response.arrayBuffer(), {
+        // Stream file bodies to avoid buffering large media in worker memory.
+        const responseBody = isFile ? response.body : await response.arrayBuffer();
+
+        return new Response(responseBody, {
             status:     response.status,
             statusText: response.statusText,
             headers:    getCorsHeaders(responseHeaders)
