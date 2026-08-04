@@ -354,7 +354,7 @@ function handleRootRequest(request) {
 '</div>\n' +
 '\n' +
 '<footer>\n' +
-'  <p>Powered by Cloudflare Workers &nbsp;&middot;&nbsp; Engineered by <strong>Anonymous</strong></p>\n' +
+'  <p>Powered by Cloudflare Workers &nbsp;&middot;&nbsp; Engineered by: <strong>Anonymous</strong></p>\n' +
 '</footer>\n' +
 '\n' +
 '</div>\n' +
@@ -508,7 +508,7 @@ async function handleProxyRequest(request) {
 
         const response = await proxyWithRetry(request, info);
 
-        updateCircuitBreaker(info.clientIP, response.ok);
+        updateCircuitBreaker(info.clientIP, response.status < 500);
         updateStats(startTime, response.ok);
 
         return response;
@@ -782,6 +782,9 @@ function checkCircuitBreaker(clientIP) {
 function updateCircuitBreaker(clientIP, success) {
     let b = circuitBreakers.get(clientIP);
     if (!b) {
+        if (circuitBreakers.size >= CACHE_MAX_SIZE) {
+            circuitBreakers.delete(circuitBreakers.keys().next().value);
+        }
         b = { state: 'CLOSED', failureCount: 0, lastFailureTime: 0, halfOpenAttempts: 0 };
         circuitBreakers.set(clientIP, b);
     }
@@ -870,7 +873,7 @@ async function proxyToTelegram(request, info) {
 
     if (!isFile && request.method !== 'GET' && request.method !== 'HEAD') {
         try {
-            if (contentType.includes('multipart/form-data') || FILE_UPLOAD_METHODS.has(apiMethod)) {
+            if (contentType.includes('multipart/form-data')) {
                 requestBody = await request.formData();
                 requestHeaders.delete('content-type');
             } else {
@@ -919,11 +922,9 @@ async function proxyToTelegram(request, info) {
         const responseHeaders = new Headers(response.headers);
         addSecurityHeaders(responseHeaders);
         if (isFile) {
-            // Binary file responses should not be blocked by an API CSP.
             responseHeaders.delete('Content-Security-Policy');
         }
 
-        // Stream file bodies to avoid buffering large media in worker memory.
         const responseBody = isFile ? response.body : await response.arrayBuffer();
 
         return new Response(responseBody, {
